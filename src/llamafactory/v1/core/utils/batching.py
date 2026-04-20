@@ -153,6 +153,8 @@ class BatchGenerator(Iterator):
         )
         if self.batching_strategy == BatchingStrategy.NORMAL:
             self._length = len(self._data_provider)
+        elif self.batching_strategy == BatchingStrategy.PADDING_FREE:
+            self._length = len(self._data_provider)
         else:
             from ...plugins.trainer_plugins.batching import BatchingPlugin
 
