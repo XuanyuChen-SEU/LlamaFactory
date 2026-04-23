@@ -1,25 +1,12 @@
-# Copyright 2025 LlamaFactory team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import bisect
 from typing import Iterator, List
+from torch.utils.data import default_collate
+import torch
 
 from ...utils.constants import IGNORE_INDEX
 from ...utils.objects import StatefulBuffer
 from ...utils.plugin import BasePlugin
 from ...utils.types import BatchInfo, BatchInput, DataLoader, ModelInput
-
 
 def search_for_fit(numbers: List[int], capacity: int) -> int:
     """使用二分查找找到最接近但不超过容量的索引。
@@ -75,11 +62,11 @@ class BatchingPlugin(BasePlugin):
 
     def fill_buffer(self, buffer: StatefulBuffer, batch_info: BatchInfo, data_iter: Iterator[List[ModelInput]]) -> None:
         """Fill the buffer with data."""
-        raise NotImplementedError()
+        return self['fill_buffer'](buffer, batch_info, data_iter)
 
     def generate_batch(self, buffer: StatefulBuffer, batch_info: BatchInfo) -> list[BatchInput] | None:
         """Generate a batch from the buffer."""
-        raise NotImplementedError()
+        return self['generate_batch'](buffer, batch_info)
 
 @BatchingPlugin("padding_free").register("compute_length")
 def padding_free_compute_length(data_provider: DataLoader) -> int:
@@ -168,10 +155,12 @@ def padding_free_generate_batch(
         packed_labels.extend(sample["labels"])
         packed_loss_weights.extend(sample["loss_weights"])
 
-    return [{
-        "input_ids": packed_input_ids,
-        "attention_mask": packed_attention_mask,
-        "position_ids": packed_position_ids,
-        "labels": packed_labels,
-        "loss_weights": packed_loss_weights,
-    }]
+    micro_batch = {
+        "input_ids": torch.tensor(packed_input_ids, dtype=torch.long).unsqueeze(0),
+        "attention_mask": torch.tensor(packed_attention_mask, dtype=torch.bool).unsqueeze(0),
+        "position_ids": torch.tensor(packed_position_ids, dtype=torch.long).unsqueeze(0),
+        "labels": torch.tensor(packed_labels, dtype=torch.long).unsqueeze(0),
+        "loss_weights": torch.tensor(packed_loss_weights, dtype=torch.float).unsqueeze(0),
+    }
+
+    return [micro_batch]
