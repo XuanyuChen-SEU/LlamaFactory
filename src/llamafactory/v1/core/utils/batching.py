@@ -24,6 +24,7 @@
 """
 
 from collections.abc import Iterator
+from math import ceil
 from typing import Any
 
 import torch
@@ -142,7 +143,12 @@ class BatchGenerator(Iterator):
 
         self._data_provider = StatefulDataLoader(
             self.dataset,
-            batch_size=self.micro_batch_size * self.num_micro_batch,
+            batch_size=(
+                1
+                if self.batching_strategy
+                in (BatchingStrategy.DYNAMIC_BATCHING, BatchingStrategy.DYNAMIC_PADDING_FREE)
+                else self.micro_batch_size * self.num_micro_batch
+            ),
             sampler=sampler,
             num_workers=self.batching_workers,
             collate_fn=self.renderer.process_samples,
@@ -151,15 +157,16 @@ class BatchGenerator(Iterator):
             drop_last=self.drop_last,
             generator=generato_seed,
         )
-        if self.batching_strategy == BatchingStrategy.NORMAL:
+        if self.batching_strategy in (BatchingStrategy.NORMAL, BatchingStrategy.PADDING_FREE):
             self._length = len(self._data_provider)
-        elif self.batching_strategy == BatchingStrategy.PADDING_FREE:
-            self._length = len(self._data_provider)
+        elif self.batching_strategy in (BatchingStrategy.DYNAMIC_BATCHING, BatchingStrategy.DYNAMIC_PADDING_FREE):
+            # 动态模式下，每个 step 实际消耗多少条样本由长度分布决定，
+            # 所以这里只能给出一个近似长度，真正的停训应交给 max_steps。
+            self._length = ceil(len(self._data_provider) / (self.micro_batch_size * self.num_micro_batch))
         else:
             from ...plugins.trainer_plugins.batching import BatchingPlugin
 
             self._length = BatchingPlugin(self.batching_strategy).compute_length(self._data_provider)
-            raise NotImplementedError("Batching strategy other than NORMAL is not supported yet.")
 
     def __len__(self) -> int:
         return self._length
@@ -167,9 +174,9 @@ class BatchGenerator(Iterator):
     def __iter__(self):
         if not self._is_resuming:
             self._buffer.clear()
-            self._buffer_tokens = 0
 
         self._data_iter = iter(self._data_provider)
+        self._batch_info["data_iter"] = self._data_iter
         self._is_resuming = False
         return self
 
@@ -184,16 +191,15 @@ class BatchGenerator(Iterator):
     def _fill_buffer(self) -> None:
         if self.batching_strategy == BatchingStrategy.NORMAL:
             while len(self._buffer) < self.micro_batch_size * self.num_micro_batch:
-                try:
-                    samples: list[ModelInput] = next(self._data_iter)
-                except StopIteration:
+                samples = self._next_samples(restart=False)
+                if samples is None:
                     break
 
                 self._buffer.put(samples)
         else:
             from ...plugins.trainer_plugins.batching import BatchingPlugin
 
-            BatchingPlugin(self.batching_strategy).fill_buffer(self._buffer, self._batch_info)
+            BatchingPlugin(self.batching_strategy).fill_buffer(self._buffer, self._batch_info, self._next_samples)
 
     def _generate_batch(self) -> list[BatchInput] | None:
         if self.batching_strategy == BatchingStrategy.NORMAL:
@@ -205,16 +211,31 @@ class BatchGenerator(Iterator):
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "buffer": self._buffer,
-            "buffer_tokens": self._buffer_tokens,
+            "buffer": self._buffer.state_dict(),
             "data_provider": self._data_provider.state_dict(),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        self._buffer = state["buffer"]
-        self._buffer_tokens = state["buffer_tokens"]
+        self._buffer.load_state_dict(state["buffer"])
         self._data_provider.load_state_dict(state["data_provider"])
         self._is_resuming = True
+
+    def _next_samples(self, restart: bool) -> list[ModelInput] | None:
+        try:
+            return next(self._data_iter)
+        except StopIteration:
+            if not restart:
+                return None
+
+            # 动态模式下允许重新打开本 rank shard 的 iterator。
+            # 这样做的目的不是维持传统 epoch 语义，而是保证所有 rank 都能继续
+            # 往 fixed max_steps 推进，避免某些 rank 因局部样本先耗尽而提前停掉。
+            self._data_iter = iter(self._data_provider)
+            self._batch_info["data_iter"] = self._data_iter
+            try:
+                return next(self._data_iter)
+            except StopIteration:
+                return None
 
     def set_epoch(self, epoch: int) -> None:
         if hasattr(self._data_provider.sampler, "set_epoch"):

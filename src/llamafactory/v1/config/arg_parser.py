@@ -22,6 +22,7 @@ from transformers import HfArgumentParser
 
 from ..utils.env import is_env_enabled
 from ..utils.helper import set_seed
+from .arg_utils import BatchingStrategy
 from .data_args import DataArguments
 from .model_args import ModelArguments
 from .sample_args import SampleArguments
@@ -64,6 +65,12 @@ def get_args(args: InputArgument = None) -> tuple[ModelArguments, DataArguments,
         if seed is not None:
             set_seed(seed)
             break
+
+    _, _, training_args, _ = parsed_args
+    if training_args.batching_strategy in (BatchingStrategy.DYNAMIC_BATCHING, BatchingStrategy.DYNAMIC_PADDING_FREE):
+        # 动态模式下每个 step 的样本数不固定，训练主语义必须转向 fixed max_steps。
+        if training_args.max_steps is None or training_args.max_steps <= 0:
+            raise ValueError("Dynamic batching requires `max_steps` so all ranks execute the same step count.")
 
     return tuple(parsed_args)
 

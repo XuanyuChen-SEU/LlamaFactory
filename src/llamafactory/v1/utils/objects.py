@@ -33,6 +33,10 @@ class StatefulBuffer:
     def size(self) -> int:
         return self._buffer_size
 
+    @property
+    def samples(self) -> list[ModelInput]:
+        return self._buffer
+
     def put(self, samples: list[ModelInput]) -> None:
         """Add samples to the buffer."""
         num_tokens = sum(len(sample["input_ids"]) for sample in samples)
@@ -47,6 +51,25 @@ class StatefulBuffer:
         samples = self._buffer[:value]
         self._buffer_size -= sum(len(sample["input_ids"]) for sample in samples)
         del self._buffer[:value]
+        return samples
+
+    def pop_indices(self, indices: list[int]) -> list[ModelInput]:
+        """Get samples from arbitrary indices and remove them."""
+        if not indices:
+            return []
+
+        if len(set(indices)) != len(indices):
+            raise ValueError("Indices must be unique when popping samples from buffer.")
+
+        if min(indices) < 0 or max(indices) >= len(self._buffer):
+            raise IndexError("Buffer pop index out of range.")
+
+        # 按传入顺序返回选中的样本，让上层可以决定 pack 内部的排列顺序；
+        # 同时剩余样本保持原有相对顺序，避免影响后续局部 greedy 的候选集合。
+        samples = [self._buffer[index] for index in indices]
+        removed = set(indices)
+        self._buffer = [sample for index, sample in enumerate(self._buffer) if index not in removed]
+        self._buffer_size -= sum(len(sample["input_ids"]) for sample in samples)
         return samples
 
     def clear(self) -> None:
