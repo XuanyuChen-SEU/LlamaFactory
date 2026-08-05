@@ -295,3 +295,4 @@ def pair_converter(raw_sample: PairSample) -> DPOSample:
             logger.warning_rank0(f"Invalid tools format: {str(tools)}")
 
     return sample
+

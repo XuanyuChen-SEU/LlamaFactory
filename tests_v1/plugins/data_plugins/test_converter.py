@@ -259,3 +259,4 @@ def test_pair_converter(num_samples: int):
             ],
         }
         assert data_engine[index] == {"_dataset_name": "tiny_dataset", **expected_data}
+
